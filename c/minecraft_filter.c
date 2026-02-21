@@ -312,12 +312,12 @@ __s32 minecraft_filter(struct xdp_md *ctx)
     }
 
     // ========================================================
-    //  PPV2 EXTRACTION & LAYER 7 RATE LIMITER
+    // PPV2 EXTRACTION & LAYER 7 RATE LIMITER
     // ========================================================
     __u32 real_client_ip = 0; 
 
-    // STRICT VERIFIER FIX: Must explicitly check against data_end.
-    // We check for 28 bytes because a Cloudflare IPv4 PPv2 header is exactly 28 bytes long.
+    // STRICT VERIFIER FIX: A Cloudflare IPv4 PPv2 header is EXACTLY 28 bytes.
+    // By checking for exactly 28 bytes, we avoid variable-length pointer shifts.
     if (tcp_payload + 28 <= (__u8 *)data_end && tcp_payload + 28 <= tcp_payload_end) {
         __u8 is_ppv2 = 1;
         const __u8 pp2_signature[12] = {
@@ -333,36 +333,33 @@ __s32 minecraft_filter(struct xdp_md *ctx)
         }
 
         if (is_ppv2) {
-            // 1. Extract the Real IPv4 Address
             // Byte 13 is the protocol family (0x11 = AF_INET/IPv4)
+            // This entire XDP firewall only supports IPv4 anyway, so we strictly check for 0x11.
             if (tcp_payload[13] == 0x11) {
+                // 1. Extract the Real IPv4 Address
                 __builtin_memcpy(&real_client_ip, tcp_payload + 16, sizeof(real_client_ip));
-            }
-
-            // 2. Shift the payload pointer past the PPv2 header
-            __u16 addr_len = (tcp_payload[14] << 8) | tcp_payload[15];
-            __u16 total_ppv2_len = 16 + addr_len;
-            tcp_payload += total_ppv2_len;
-            
-            // STRICT VERIFIER FIX: Re-verify bounds against data_end after shifting
-            if (tcp_payload > (__u8 *)data_end || tcp_payload > tcp_payload_end) {
-                goto drop;
-            }
-
-            // 3. LAYER 7 FLOOD PROTECTION (Rate Limit the Real IP)
-            if (real_client_ip != 0) {
-                __u32 *hit_counter = bpf_map_lookup_elem(&connection_throttle, &real_client_ip);
-                if (hit_counter) {
-                    if (*hit_counter > HIT_COUNT) {
-                        // The bot exceeded the limit. Wipe connection completely.
-                        goto drop_connection; 
+                
+                // 2. CRITICAL VERIFIER FIX: Shift by a CONSTANT 28 bytes.
+                // Because this is a constant, the verifier keeps its memory safety tracking intact.
+                tcp_payload += 28;
+                
+                // 3. LAYER 7 FLOOD PROTECTION (Rate Limit the Real IP)
+                if (real_client_ip != 0) {
+                    __u32 *hit_counter = bpf_map_lookup_elem(&connection_throttle, &real_client_ip);
+                    if (hit_counter) {
+                        if (*hit_counter > HIT_COUNT) {
+                            goto drop_connection; 
+                        }
+                        // Increment the flood counter
+                        (*hit_counter)++;
+                    } else {
+                        __u32 new_counter = 1;
+                        bpf_map_update_elem(&connection_throttle, &real_client_ip, &new_counter, BPF_NOEXIST);
                     }
-                    // Increment the flood counter
-                    (*hit_counter)++;
-                } else {
-                    __u32 new_counter = 1;
-                    bpf_map_update_elem(&connection_throttle, &real_client_ip, &new_counter, BPF_NOEXIST);
                 }
+            } else {
+                // If it's a PPv2 header but NOT IPv4, drop it.
+                goto drop;
             }
         }
     }
