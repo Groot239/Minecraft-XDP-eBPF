@@ -317,7 +317,7 @@ __s32 minecraft_filter(struct xdp_md *ctx)
     __u32 real_client_ip = 0; 
 
     if (tcp_payload + 16 <= tcp_payload_end) {
-        bool is_ppv2 = true;
+        __u8 is_ppv2 = 1; // Replaced bool with __u8
         const __u8 pp2_signature[12] = {
             0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A
         };
@@ -325,7 +325,7 @@ __s32 minecraft_filter(struct xdp_md *ctx)
         #pragma unroll
         for (int i = 0; i < 12; i++) {
             if (tcp_payload[i] != pp2_signature[i]) {
-                is_ppv2 = false;
+                is_ppv2 = 0; // Replaced false with 0
                 break;
             }
         }
