@@ -312,54 +312,67 @@ __s32 minecraft_filter(struct xdp_md *ctx)
     }
 
     // ========================================================
-    // PPV2 EXTRACTION & LAYER 7 RATE LIMITER
+    // PPV2 EXTRACTION, IPv4/IPv6 & SEQUENCE FIX
     // ========================================================
     __u32 real_client_ip = 0; 
 
-    // STRICT VERIFIER FIX: A Cloudflare IPv4 PPv2 header is EXACTLY 28 bytes.
-    // By checking for exactly 28 bytes, we avoid variable-length pointer shifts.
-    if (tcp_payload + 28 <= (__u8 *)data_end && tcp_payload + 28 <= tcp_payload_end) {
+    // We only need 16 bytes to safely check the signature and protocol family
+    if (tcp_payload + 16 <= tcp_payload_end && tcp_payload + 16 <= (__u8 *)data_end) {
         __u8 is_ppv2 = 1;
-        const __u8 pp2_signature[12] = {
+        const __u8 pp2_sig[12] = {
             0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A
         };
         
         #pragma unroll
         for (int i = 0; i < 12; i++) {
-            if (tcp_payload[i] != pp2_signature[i]) {
+            if (tcp_payload[i] != pp2_sig[i]) {
                 is_ppv2 = 0;
                 break;
             }
         }
 
         if (is_ppv2) {
-            // Byte 13 is the protocol family (0x11 = AF_INET/IPv4)
-            // This entire XDP firewall only supports IPv4 anyway, so we strictly check for 0x11.
+            // Check for IPv4 (0x11) which has a 28-byte total header
             if (tcp_payload[13] == 0x11) {
-                // 1. Extract the Real IPv4 Address
-                __builtin_memcpy(&real_client_ip, tcp_payload + 16, sizeof(real_client_ip));
-                
-                // 2. CRITICAL VERIFIER FIX: Shift by a CONSTANT 28 bytes.
-                // Because this is a constant, the verifier keeps its memory safety tracking intact.
-                tcp_payload += 28;
-                
-                // 3. LAYER 7 FLOOD PROTECTION (Rate Limit the Real IP)
-                if (real_client_ip != 0) {
-                    __u32 *hit_counter = bpf_map_lookup_elem(&connection_throttle, &real_client_ip);
-                    if (hit_counter) {
-                        if (*hit_counter > HIT_COUNT) {
-                            goto drop_connection; 
-                        }
-                        // Increment the flood counter
-                        (*hit_counter)++;
-                    } else {
-                        __u32 new_counter = 1;
-                        bpf_map_update_elem(&connection_throttle, &real_client_ip, &new_counter, BPF_NOEXIST);
-                    }
+                if (tcp_payload + 28 <= tcp_payload_end && tcp_payload + 28 <= (__u8 *)data_end) {
+                    // Extract Real IPv4 Address
+                    __builtin_memcpy(&real_client_ip, tcp_payload + 16, sizeof(real_client_ip));
+                    tcp_payload += 28; // Constant shift for verifier
+                } else {
+                    goto drop; // Malformed IPv4 header
                 }
-            } else {
-                // If it's a PPv2 header but NOT IPv4, drop it.
+            } 
+            // Check for IPv6 (0x21) which has a 52-byte total header
+            else if (tcp_payload[13] == 0x21) {
+                if (tcp_payload + 52 <= tcp_payload_end && tcp_payload + 52 <= (__u8 *)data_end) {
+                    tcp_payload += 52; // Constant shift for verifier (Rate limiting IPv6 omitted)
+                } else {
+                    goto drop; // Malformed IPv6 header
+                }
+            } 
+            else {
+                // Unsupported PPv2 protocol (e.g., UNIX socket)
                 goto drop;
+            }
+
+            // LAYER 7 FLOOD PROTECTION (Rate Limit the Real IPv4)
+            if (real_client_ip != 0) {
+                __u32 *hit_counter = bpf_map_lookup_elem(&connection_throttle, &real_client_ip);
+                if (hit_counter) {
+                    if (*hit_counter > HIT_COUNT) {
+                        goto drop_connection; 
+                    }
+                    (*hit_counter)++;
+                } else {
+                    __u32 new_counter = 1;
+                    bpf_map_update_elem(&connection_throttle, &real_client_ip, &new_counter, BPF_NOEXIST);
+                }
+            }
+
+            // CRITICAL FIX: If Cloudflare sent the PPv2 header in its own packet, 
+            // we MUST update the TCP sequence tracker before passing it!
+            if (tcp_payload == tcp_payload_end) {
+                goto update_state_or_drop;
             }
         }
     }
