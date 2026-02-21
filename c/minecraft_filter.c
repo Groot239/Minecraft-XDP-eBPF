@@ -310,7 +310,58 @@ __s32 minecraft_filter(struct xdp_md *ctx)
     {
         goto drop;
     }
+// ========================================================
+    //  PPV2 EXTRACTION & LAYER 7 RATE LIMITER
+    // ========================================================
+    __u32 real_client_ip = 0; 
 
+    if (tcp_payload + 16 <= tcp_payload_end) {
+        bool is_ppv2 = true;
+        const __u8 pp2_signature[12] = {
+            0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A
+        };
+        
+        #pragma unroll
+        for (int i = 0; i < 12; i++) {
+            if (tcp_payload[i] != pp2_signature[i]) {
+                is_ppv2 = false;
+                break;
+            }
+        }
+
+        if (is_ppv2) {
+            // 1. Extract the Real IPv4 Address (Starts at byte 16)
+            if (tcp_payload[13] == 0x11 && tcp_payload + 20 <= tcp_payload_end) {
+                __builtin_memcpy(&real_client_ip, tcp_payload + 16, sizeof(real_client_ip));
+            }
+
+            // 2. Shift the payload pointer past the PPv2 header
+            __u16 addr_len = (tcp_payload[14] << 8) | tcp_payload[15];
+            __u16 total_ppv2_len = 16 + addr_len;
+            tcp_payload += total_ppv2_len;
+            
+            if (tcp_payload > tcp_payload_end) {
+                goto drop;
+            }
+
+            // 3. LAYER 7 FLOOD PROTECTION (Rate Limit the Real IP)
+            if (real_client_ip != 0) {
+                __u32 *hit_counter = bpf_map_lookup_elem(&connection_throttle, &real_client_ip);
+                if (hit_counter) {
+                    if (*hit_counter > HIT_COUNT) {
+                        // The bot is flooding data packets. Drop them silently.
+                        goto drop; 
+                    }
+                    // Increment the flood counter
+                    __sync_fetch_and_add(hit_counter, 1);
+                } else {
+                    __u32 new_counter = 1;
+                    bpf_map_update_elem(&connection_throttle, &real_client_ip, &new_counter, BPF_NOEXIST);
+                }
+            }
+        }
+    }
+    // ========================================================
     if (tcp_payload < tcp_payload_end)
     {
 
