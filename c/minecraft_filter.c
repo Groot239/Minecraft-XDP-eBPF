@@ -310,14 +310,49 @@ __s32 minecraft_filter(struct xdp_md *ctx)
     {
         goto drop;
     }
-
-    if (tcp_payload < tcp_payload_end)
-    {
-
-        if (!tcp->ack)
-        {
-            goto drop_connection;
+// ========================================================
+    // START: PROXY PROTOCOL V2 BYPASS
+    // ========================================================
+    if (tcp_payload + 16 <= tcp_payload_end) {
+        bool is_ppv2 = true;
+        const __u8 pp2_signature[12] = {
+            0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A
+        };
+        
+        #pragma unroll
+        for (int i = 0; i < 12; i++) {
+            if (tcp_payload[i] != pp2_signature[i]) {
+                is_ppv2 = false;
+                break;
+            }
         }
+
+        if (is_ppv2) {
+            // Read address length from bytes 14 and 15
+            __u16 addr_len = (tcp_payload[14] << 8) | tcp_payload[15];
+            __u16 total_ppv2_len = 16 + addr_len;
+            
+            // Shift the payload pointer past the PPv2 header
+            tcp_payload += total_ppv2_len;
+            
+            // Ensure shifting didn't push us past the end of the packet
+            if (tcp_payload > tcp_payload_end) {
+                goto drop;
+            }
+        }
+    }
+    // ========================================================
+    // END: PROXY PROTOCOL V2 BYPASS
+    // ========================================================
+    
+    if (tcp_payload < tcp_payload_end)
+    {
+
+        if (!tcp->ack)
+        {
+            goto drop_connection;
+        }
+        
 
         // we fully track the tcp packet order with this check,
         // this mean we can hard punish invalid packets below, as they are not out of order
