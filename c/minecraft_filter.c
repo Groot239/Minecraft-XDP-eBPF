@@ -310,7 +310,8 @@ __s32 minecraft_filter(struct xdp_md *ctx)
     {
         goto drop;
     }
-// ========================================================
+
+    // ========================================================
     //  PPV2 EXTRACTION & LAYER 7 RATE LIMITER
     // ========================================================
     __u32 real_client_ip = 0; 
@@ -349,11 +350,11 @@ __s32 minecraft_filter(struct xdp_md *ctx)
                 __u32 *hit_counter = bpf_map_lookup_elem(&connection_throttle, &real_client_ip);
                 if (hit_counter) {
                     if (*hit_counter > HIT_COUNT) {
-                        // The bot is flooding data packets. Drop them silently.
-                        goto drop; 
+                        // The bot exceeded the limit. Wipe connection completely.
+                        goto drop_connection; 
                     }
                     // Increment the flood counter
-                    __sync_fetch_and_add(hit_counter, 1);
+                    (*hit_counter)++;
                 } else {
                     __u32 new_counter = 1;
                     bpf_map_update_elem(&connection_throttle, &real_client_ip, &new_counter, BPF_NOEXIST);
@@ -362,6 +363,7 @@ __s32 minecraft_filter(struct xdp_md *ctx)
         }
     }
     // ========================================================
+
     if (tcp_payload < tcp_payload_end)
     {
 
