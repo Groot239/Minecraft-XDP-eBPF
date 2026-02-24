@@ -271,16 +271,19 @@ __s32 minecraft_filter(struct xdp_md *ctx)
                     __builtin_memcpy(&real_client_ip, tcp_payload + 16, sizeof(real_client_ip));
                     
                     // Flood Protection using the real IP
-                    if (real_client_ip != 0) {
-                        __u32 *hit_counter = bpf_map_lookup_elem(&connection_throttle, &real_client_ip);
-                        if (hit_counter) {
-                            if (*hit_counter > HIT_COUNT) goto drop_connection;
-                            (*hit_counter)++;
-                        } else {
-                            __u32 new_counter = 1;
-                            bpf_map_update_elem(&connection_throttle, &real_client_ip, &new_counter, BPF_NOEXIST);
-                        }
-                    }
+                    // Flood Protection using the real IP
+if (real_client_ip != 0) {
+    __u32 *hit_counter = bpf_map_lookup_elem(&connection_throttle, &real_client_ip);
+    if (hit_counter) {
+        // Direct increment in memory
+        __sync_fetch_and_add(hit_counter, 1); 
+        if (*hit_counter > HIT_COUNT) goto drop_connection;
+    } else {
+        __u32 new_counter = 1;
+        // Use BPF_ANY so it creates the entry if missing, or updates if present
+        bpf_map_update_elem(&connection_throttle, &real_client_ip, &new_counter, BPF_ANY);
+    }
+}
 
                     // Handle single-packet PPv2
                     if (tcp_payload + 28 == tcp_payload_end) {
